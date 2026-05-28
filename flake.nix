@@ -2,7 +2,12 @@
   description = "A minimal HTTP file upload server written in Rust";
 
   inputs = {
-    nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1"; # unstable Nixpkgs
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
+    naersk = {
+      url = "github:nix-community/naersk/pull/391/head";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     fenix = {
       url = "https://flakehub.com/f/nix-community/fenix/0.1";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -10,92 +15,60 @@
   };
 
   outputs =
-    { self, ... }@inputs:
+    { self, flake-utils, naersk, nixpkgs, fenix, ... }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs = import nixpkgs { inherit system; };
 
-    let
-      supportedSystems = [
-        "x86_64-linux"
-        "aarch64-linux"
-        "aarch64-darwin"
-      ];
-      forEachSupportedSystem =
-        f:
-        inputs.nixpkgs.lib.genAttrs supportedSystems (
-          system:
-          f {
-            inherit system;
-            pkgs = import inputs.nixpkgs {
-              inherit system;
-              overlays = [
-                inputs.self.overlays.default
-              ];
-            };
-          }
-        );
-    in
-    {
-      overlays.default = final: prev: {
-        rustToolchain =
-          with inputs.fenix.packages.${prev.stdenv.hostPlatform.system};
-          combine (
-            with stable;
-            [
-              clippy
-              rustc
-              cargo
-              rustfmt
-              rust-src
-            ]
-          );
-      };
+        rustToolchain = with fenix.packages.${system};
+          combine (with stable; [ clippy rustc cargo rustfmt rust-src ]);
 
-      packages = forEachSupportedSystem (
-        { pkgs, ... }:
-        let
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = pkgs.rustToolchain;
-            rustc = pkgs.rustToolchain;
+        naersk' = pkgs.callPackage naersk {
+          cargo = rustToolchain;
+          rustc = rustToolchain;
+        };
+
+        built = naersk'.buildPackage {
+          pname = "receive";
+          version = "0.1.0";
+          src = self;
+        };
+      in
+      {
+        packages = {
+          receive = pkgs.runCommand "receive" { } ''
+            mkdir -p $out/bin
+            cp ${built}/bin/receive $out/bin/receive
+          '';
+          serve = pkgs.runCommand "serve" { } ''
+            mkdir -p $out/bin
+            cp ${built}/bin/serve $out/bin/serve
+          '';
+          default = pkgs.symlinkJoin {
+            name = "receive-all";
+            paths = [ self.packages.${system}.receive self.packages.${system}.serve ];
           };
-        in
-        {
-          receive = rustPlatform.buildRustPackage {
-            pname = "receive";
-            version = "0.1.0";
-            src = self;
-            cargoLock.lockFile = "${self}/Cargo.lock";
-          };
-          default = rustPlatform.buildRustPackage {
-            pname = "receive";
-            version = "0.1.0";
-            src = self;
-            cargoLock.lockFile = "${self}/Cargo.lock";
-          };
-        }
-      );
+        };
 
-      devShells = forEachSupportedSystem (
-        { pkgs, system }:
-        {
-          default = pkgs.mkShell {
-            packages = with pkgs; [
-              rustToolchain
-              openssl
-              pkg-config
-              cargo-deny
-              cargo-edit
-              cargo-watch
-              rust-analyzer
-              self.formatter.${system}
-            ];
+        devShells.default = pkgs.mkShell {
+          packages = with pkgs; [
+            rustToolchain
+            openssl
+            pkg-config
+            cargo-deny
+            cargo-edit
+            cargo-watch
+            rust-analyzer
+            nixfmt
+          ];
 
-            env = {
-              # Required by rust-analyzer
-              RUST_SRC_PATH = "${pkgs.rustToolchain}/lib/rustlib/src/rust/library";
-            };
+          env = {
+            RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           };
-        }
-      );
+        };
 
-      formatter = forEachSupportedSystem ({ pkgs, ... }: pkgs.nixfmt);
-    };
+        formatter = pkgs.nixfmt;
+      }
+    );
 }
